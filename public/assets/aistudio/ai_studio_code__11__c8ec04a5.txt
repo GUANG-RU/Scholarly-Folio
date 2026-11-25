@@ -1,0 +1,96 @@
+# Tasks — Personal Research & Note Workspace (V1)
+
+## Slice 0：基礎設施、資安底座與品質契約（Sequential — 必須最先完成）
+
+### 0.1 專案初始化與品質門檻建置
+- [ ] 初始化 Next.js 16.4（TypeScript `strict: true`）、Tailwind CSS、ESLint、Vitest（`@vitest/coverage-v8`）、Playwright
+- [ ] 寫入 `CONSTRAINTS.md`、`.gitignore`（排除 `coverage/`、`semgrep-results.json`、`axe-results.json`），並在 `AGENTS.md` / `CLAUDE.md` 加入必讀規則
+- [ ] 實作並接線 `scripts/quality-gate.mjs` 與 `package.json`（`check:fast` / `check:task` / `check:security` / `check:a11y` / `check:full`）
+- [ ] 校正每條 Enforced 指令（違規樣本應失敗、乾淨對照應通過、工具異常應失敗）
+
+### 0.2 資料庫 Schema（Prisma + PostgreSQL）
+- [ ] 建立 Better Auth 託管模型（`User`, `Session`, `Account`, `Verification`）
+- [ ] 建立業務模型，**全數明確加上 `userId` 外鍵與索引**：
+  - `Topic` (`id`, `userId`, `name`, `slug`, `sortOrder`, `isSystemInbox`)
+  - `Note` (`id`, `userId`, `topicId`, `title`, `content`, `status: DRAFT | ARCHIVED`, `tags: String[]`, `summary`, `updatedAt`)
+  - `CourseRef` (`id`, `noteId`, `type: COURSE | PAPER`, `title`, `provider`, `summary`, `url`)
+  - `ShareBundle` + 關聯表 `ShareBundleNote`（`id`, `userId`, `slug` 高熵隨機碼, `title`, `createdAt`, `onDelete: Cascade`）
+- [ ] 建立資料庫 `prisma/seed.ts` 確保預設系統 `Inbox` 主題存在
+
+### 0.3 Better Auth + OAuth 單一白名單與登出零殘留
+- [ ] 設定 Google / GitHub OAuth，**關閉 `cookieCache`**（強制每次走 DB Session 查詢，確保登出即時作廢）
+- [ ] 實作 OAuth 白名單前置攔截：建立 User／Account／Session 前驗證 `email.trim().toLowerCase() === OWNER_EMAIL.trim().toLowerCase()` **且 `emailVerified === true`**
+- [ ] 實作 `requireOwnerSession()` 統一驗證函式：檢查 HTTP-only Session 存在、未過期、且對應使用者 Email 仍吻合當前 `OWNER_EMAIL`
+- [ ] 設定 `proxy.ts`（Node.js runtime）：僅負責未登入頁面導向 `/login`，不作為唯一資安邊界
+- [ ] 實作完整登出端點與客戶端清理流程：
+  - 呼叫 Better Auth `signOut()` 刪除 DB `Session`
+  - Response 明確過期所有 auth cookies，並附帶 `Clear-Site-Data: "cookies", "storage", "cache"`
+  - 所有受保護頁面／API 回傳 `Cache-Control: private, no-store, max-age=0`
+- [ ] **Checkpoint 0 驗證**：未登入呼叫私人 API / Server Action 一律回 `401`；非白名單或未驗證 Email 的 OAuth 登入遭拒絕；完成後量測並將專案初始覆蓋率與 Main JS bundle size 寫入 `CONSTRAINTS.md` 棘輪基準表
+
+---
+
+## Slice 1：寫作、雲端載入與跨裝置閱讀閉環（Sequential after Slice 0）
+
+### 1.1 DAL（Data Access Layer）與權限收斂
+- [ ] 實作 `src/lib/dal/notes.ts` 與 `src/lib/dal/topics.ts`：所有查詢與寫入強制經由 `requireOwnerSession()` 並以 `userId` 過濾
+- [ ] 未登入瀏覽 `/login` 時確定不預載、不序列化任何私人筆記或 Topic 資料
+
+### 1.2 桌機極簡編輯器與手機純淨閱讀
+- [ ] 登入成功後由雲端 PostgreSQL 拉取 `Topic` 與 `Note` 載入工作區
+- [ ] 實作極簡 Markdown 寫作區（支援手動儲存與雲端 `DRAFT` 暫存狀態標示）
+- [ ] 實作響應式目錄樹與關鍵字搜尋；`< 768px` 手機視窗預設純淨閱讀模式，隱藏編輯工具列
+- [ ] 實作未存檔偵測與登出流程：
+  - 偵測編輯區有尚未寫入雲端的變更時，點擊登出跳出確認：「先存回雲端再登出」或「不存直接清空登出」
+  - 執行登出時清空 `localStorage`、`sessionStorage`、`IndexedDB`、Cache Storage，並以 `window.location.replace('/login')` 強制洗掉記憶體狀態
+  - 加上 `pageshow` (`event.persisted`) 監聽，阻止瀏覽器「上一頁」bfcache 殘留畫面
+- [ ] **Checkpoint 1 驗證（Playwright）**：桌機存檔後於 `390x844` 手機視窗直接閱讀與搜尋無遮擋；登出後驗證 Cookies／Web Storage／IndexedDB 全空，且按上一頁無法看到筆記
+
+---
+
+## 平行開發軌道（Slice 0 定案後，以下純模組可平行推進）
+
+### Slice 2（純模組）：外部課程與文獻檢索轉接器（`src/lib/courses/`）
+- [ ] 實作筆記關鍵字萃取純函式（標題＋重點名詞）
+- [ ] 實作 OpenAlex API 轉接器（標註 `[學術文獻]`）與開放課程白名單索引轉接器（標註 `[開放課程]`）
+- [ ] 使用 `Promise.allSettled` 並行查詢並強制 **4 秒超時上限**（`AbortSignal.timeout(4000)`），單一來源超時或錯誤不拖垮另一來源
+- [ ] 驗證與淨化回傳 `url`（僅允許 `http:` / `https:`）
+- [ ] 撰寫 Vitest 單元測試（含超時模擬、單邊失敗容錯、惡意 URL 過濾）
+
+### Slice 3（純模組）：AI 自動分類與標籤模組（`src/lib/ai/`）
+- [ ] 實作提示詞組裝與輸出 Schema 驗證（輸入：筆記標題＋前 1,500 字＋既有 `Topic` 清單；輸出：既有 `topicId` 或最多 1 個新主題名稱＋1–3 個標籤）
+- [ ] 實作 **5 秒超時上限** 與錯誤降級策略：超時、網路失敗或格式不合法時回傳降級結果（歸入系統 `Inbox`）
+- [ ] 撰寫 Vitest 單元測試（含既有主題命中、禁止濫建主題、超時降級回 `Inbox`）
+
+### Slice 4（純模組）：Markdown 與 JSZip 離線打包器（`src/lib/export/`）
+- [ ] 實作單篇／多篇筆記轉 `.md` 與總整理 `references.md` 組裝純函式
+- [ ] 實作 `JSZip` 串流打包器，加上單次匯出篇數與總大小上限保護、檔名消毒（防止路徑穿越 `../`）
+- [ ] 撰寫 Vitest 單元測試（驗證壓縮包目錄結構、檔名安全、上限拒絕）
+
+---
+
+## Slice 2–4 UI 與後端串接（Sequential after Slice 1 與對應純模組完成）
+
+### 2.UI 按需喚醒「外部課程參考抽屜」
+- [ ] 實作右側抽屜 UI（預設關閉與靜默，寫作過程零外部請求）
+- [ ] 點擊「尋找參考課程」或快捷鍵後呼叫後端查詢並陳列 `[開放課程]` / `[學術文獻]` 卡片
+- [ ] 實作一鍵釘選存為 `CourseRef`（透過 DAL + `requireOwnerSession()` 驗證筆記所有權）
+- [ ] **Checkpoint 2 驗證**：寫作期間 Network 無外部請求；主動喚醒後 4 秒內顯示分類卡片並成功釘選存檔
+
+### 3.UI 完成並歸檔（Auto-Organize on Finish）
+- [ ] 實作「完成並歸檔」Server Action / API：呼叫 `src/lib/ai/` 後直接寫入對應 `Topic`、標籤並將狀態設為 `ARCHIVED`
+- [ ] 失敗或超時時自動歸入 `Inbox` 且確保筆記內容 100% 寫入雲端，UI 保留「移動主題」快速下拉選單
+- [ ] **Checkpoint 3 驗證**：正常情況自動入夾；斷網／模擬 LLM 錯誤時筆記完整存進 `Inbox` 不遺失
+
+### 4.UI 一鍵打包與免登入唯讀分享（`/share/[slug]`）
+- [ ] 實作建立 `ShareBundle` 端點（使用 `crypto.randomBytes(16).toString('base64url')` 產生高熵 `slug`）
+- [ ] 實作 `/share/[slug]` 免登入公開頁：資料庫查詢顯式使用 `select` 白名單欄位，僅回傳綁定的筆記內容與 `CourseRef`，絕不帶出未分享筆記或使用者資訊
+- [ ] 串接 `.zip` 串流下載端點（需通過 `requireOwnerSession()`）
+- [ ] **Checkpoint 4 驗證**：無痕視窗開啟 `/share/[slug]` 僅能唯讀不可寫入；下載 `.zip` 解壓結構與 `references.md` 正確
+
+---
+
+## 收尾檢查（Release Gate）
+- [ ] 執行 `npm run check:full` 與 `npm run check:a11y`（針對核心閱讀頁、登入頁與 `/share/[slug]`）
+- [ ] 執行 Diff Floor Guard 檢查：確認無未授權例外、無抑制註解、無被削弱的測試與 `CONSTRAINTS.md`
+- [ ] 更新 `CONSTRAINTS.md` 棘輪表最新量測值，確認無遺留風險後合併

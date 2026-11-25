@@ -1,0 +1,14 @@
+{
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest",
+    "check:fast": "tsc --noEmit && eslint . && gitleaks dir . --redact --no-banner",
+    "check:task": "npm run check:fast && vitest run --coverage && node scripts/quality-gate.mjs coverage coverage/lcov.info",
+    "check:security": "semgrep scan --config p/default --strict --json > semgrep-results.json && node scripts/quality-gate.mjs semgrep semgrep-results.json",
+    "check:a11y": "axe \"$PREVIEW_URL\" --tags wcag2a,wcag2aa,wcag21aa --stdout > axe-results.json && node scripts/quality-gate.mjs axe axe-results.json",
+    "check:full": "npm run check:task && npm run check:security && osv-scanner scan source -r ."
+  }
+}

@@ -1,0 +1,152 @@
+# Spec: 零干擾學術研究筆記與課程靈感系統 — V1
+
+## Objective
+為學術研究者打造一個**零社交干擾、Web 雲端跨裝置同步**的研究筆記工作台。解決研究者在寫作卡關時「切出去找資料容易分心、寫完後手動分類整理很累、跨裝置閱讀與打包分享不便」的三重痛點。
+
+**核心使用者故事：**
+1. **專心寫作與主動求助**：研究者在電腦／大平板 Web 端寫筆記時介面預設完全安靜；唯有當寫作卡關、主動點擊「尋找參考課程」或按快捷鍵時，系統才依目前內容並行檢索公開開放課程與學術文獻，並陳呈現並明確標註 `[開放課程]` / `[學術文獻]` 類型標籤，支援一鍵釘選進筆記參考區。
+2. **寫完自動雲端整理**：研究者寫完筆記並按下「完成並歸檔」，系統自動上傳雲端、根據既有主題目錄直接自動分類歸檔與指派 1–3 個標籤，並將釘選的參考連結整理成結構化附錄（事後亦可隨時手動改移主題）。
+3. **跨設備純淨閱讀**：在手機或另一台平板打開 Web 版時，預設進入乾淨無雜訊的閱讀與檢索視圖，隨時翻閱已歸檔的筆記與參考連結。
+4. **一鍵打包分享**：選取單篇或多篇系統筆記，一鍵產生免登入的唯讀分享網頁連結（`/share/[slug]`），或匯出下載成獨立 `.zip` 壓縮檔（含標準 `.md` 檔與 `references.md`）供同儕／學生參考。
+
+## Tech Stack
+- **Framework & Language**: Next.js 16.4.x (App Router, Active LTS) + React 19 + TypeScript 5.x (`strict: true`)
+- **Styling & Editor**: Tailwind CSS + 極簡 Markdown 編輯器（CodeMirror / TipTap 輕量模式）
+- **Database & ORM**: PostgreSQL（雲端託管，如 Neon / Supabase）+ Prisma ORM
+- **Auth & Security**: Better Auth（Google / GitHub OAuth 單一 `OWNER_EMAIL` 白名單 + `emailVerified === true` 強制檢查、關閉 `cookieCache`、DB-backed Session）
+- **AI Auto-Organizer**: 輕量 LLM API（如 GPT-4o-mini / Claude Haiku / Gemini Flash，僅於歸檔時進行主題匹配與標籤摘要）
+- **External Course & Academic Index**: OpenAlex API（免費 API Key 每日額度）＋ 白名單開放課程索引（如 MIT OCW / 公開課程索引），以「標題＋大綱摘要＋原網址」呈現
+- **Packaging**: JSZip（後端／串流打包 Markdown 與參考連結清單）
+- **Testing & Quality**: Vitest + `@vitest/coverage-v8`、Playwright、ESLint、gitleaks、Semgrep、osv-scanner、axe-core
+
+## Commands
+```bash
+# 開發伺服器
+Dev: npm run dev
+
+# 型別檢查與建置
+Typecheck: npx tsc --noEmit
+Build: npm run build
+
+# 測試（單元／整合 + 覆蓋率、E2E）
+Test: npx vitest run --coverage
+E2E: npx playwright test --project=chromium
+
+# Lint 與品質契約檢查
+Lint: npm run lint -- --fix
+Fast Check: npm run check:fast
+Task Gate (<= 90s): npm run check:task
+Security Scan (CI): npm run check:security
+A11y Scan (Preview): npm run check:a11y
+Full Gate (CI): npm run check:full
+
+# 資料庫遷移
+DB Migrate: npx prisma migrate dev
+```
+
+## Project Structure
+```text
+src/
+├── app/                      # Next.js App Router 頁面與 API Routes
+│   ├── login/                # 單人 OAuth 登入頁（未登入不載入任何私人資料）
+│   ├── (workspace)/          # 需登入：寫作工作台、主題目錄、跨裝置純淨閱讀模式
+│   ├── share/[slug]/         # 免登入：高熵網址唯讀分享頁（僅查詢綁定筆記）
+│   └── api/                  # Route Handlers（auth, notes, organize, courses, export）
+├── components/
+│   ├── editor/               # 零干擾 Markdown 編輯器、「完成歸檔」操作列、未存檔登出防呆
+│   ├── reference-drawer/     # 按需喚醒的右側「外部課程與文獻參考抽屜」
+│   ├── reader/               # 行動端（< 768px）預設純淨閱讀視圖與搜尋
+│   └── tree/                 # 研究主題目錄、手動移動主題選單與打包選取器
+├── lib/
+│   ├── auth.ts               # Better Auth 設定與 requireOwnerSession() 守門
+│   ├── dal/                  # Data Access Layer（notes, topics, shareBundles）
+│   ├── ai/                   # 筆記自動分類與標籤指派服務（5s 超時 + Inbox 降級）
+│   ├── courses/              # OpenAlex + 開放課程索引檢索轉接器（4s 超時 + URL 淨化）
+│   ├── export/               # 唯讀分享連結生成與 JSZip 離線打包器
+│   └── db.ts                 # Prisma Client 單例
+├── prisma/
+│   ├── schema.prisma         # User/Session/Account, Topic, Note, CourseRef, ShareBundle
+│   └── seed.ts               # 初始化系統預設 Inbox 主題
+scripts/
+└── quality-gate.mjs          # 驗證 coverage diff / semgrep / axe 門檻腳本
+tests/
+├── unit/                     # 課程檢索、AI 降級、ZIP 打包與檔名消毒純函式測試
+└── integration/              # DAL 權限守門、白名單登入拒絕、分享頁資料隔離測試
+e2e/                          # 跨裝置閱讀、抽屜按需喚醒、登出零殘留與 bfcache 防護測試
+```
+
+## Code Style
+- 全面啟用 TypeScript `strict: true`，所有 API / Server Action 輸入皆以 Zod 驗證。
+- 所有受保護的資料操作一律經由 DAL 並呼叫 `requireOwnerSession()`，禁止將 `proxy.ts` 視為權限邊界。
+- 外部呼叫（LLM、OpenAlex、開放課程索引）皆須設定明確超時（`AbortSignal.timeout`）與降級路徑，失敗時絕不阻斷使用者儲存筆記。
+
+```typescript
+import { z } from "zod";
+
+const CourseSearchInputSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  excerpt: z.string().trim().max(1500).optional(),
+  limit: z.number().int().min(1).max(5).default(5),
+});
+
+export type CourseReferenceItem = {
+  externalId: string;
+  type: "COURSE" | "PAPER";
+  title: string;
+  provider: "MIT_OCW" | "CURATED_OCW" | "OPENALEX";
+  summary: string;
+  url: string;
+};
+
+export async function fetchOnDemandCourseRefs(
+  rawInput: z.input<typeof CourseSearchInputSchema>,
+): Promise<{ items: CourseReferenceItem[]; degraded: boolean }> {
+  const input = CourseSearchInputSchema.parse(rawInput);
+
+  try {
+    const signal = AbortSignal.timeout(4000);
+    const items = await queryAcademicSources(input, signal);
+    return { items, degraded: false };
+  } catch {
+    return { items: [], degraded: true };
+  }
+}
+```
+
+## Testing Strategy
+- **Unit Tests（Vitest）**：`tests/unit/`，變更行覆蓋率目標 ≥ 80%。涵蓋課程關鍵字萃取、並陳合併與 URL 消毒（僅允許 `http:`/`https:`）、AI 分類結構驗證與失敗降級回 `Inbox`、ZIP 組裝與路徑穿越防護。
+- **Integration Tests（Vitest + Test DB）**：`tests/integration/`，驗證未登入呼叫私人端點回傳 `401`、非白名單或未驗證 Email 的 OAuth 登入遭拒、`/share/[slug]` 僅回傳綁定的筆記與 `CourseRef`。
+- **E2E Tests（Playwright）**：`e2e/`，驗證桌機寫作與按需參考抽屜、手機視窗（`390x844`）純淨閱讀、無痕開啟分享連結、以及登出後 Cookies / Web Storage / IndexedDB 零殘留與上一頁 bfcache 防護。
+
+## Boundaries
+- **Always do（一律遵守）**：
+  - 寫作介面預設保持完全安靜；「外部課程參考抽屜」僅在使用者主動點擊或按快捷鍵時才請求資料並展開。
+  - 任何 AI 自動分類超時（> 5s）或失敗時，筆記仍須 100% 寫入雲端並歸入系統 `Inbox`（待確認收件匣）。
+  - 每個 Server Action、Route Handler 與 DAL 函式皆須強制呼叫 `requireOwnerSession()`。
+  - 所有受保護頁面與 API 回傳 `Cache-Control: private, no-store, max-age=0`；登出時刪除 DB Session 並清空所有客戶端儲存。
+- **Ask first（先問過再做）**：
+  - 修改 `prisma/schema.prisma` 資料模型。
+  - 新增付費或需綁卡的外部服務依賴（例如更換課程索引源或導入 Vector DB）。
+  - 調整 `/share/[slug]` 存取控制或快取策略。
+- **Never do（絕對不做）**：
+  - 絕不加入任何推播通知、紅點提醒、動態牆、按讚數、留言討論區或未經請求的自動彈窗推薦。
+  - 絕不將 `proxy.ts` 當作唯一資安邊界。
+  - 絕不在 `/login` 或 `/share/[slug]` 序列化任何未授權私人筆記或環境變數。
+  - 絕不弱化 `CONSTRAINTS.md` 或刪除／跳過失敗測試來讓建置通過。
+
+## Success Criteria
+1. **零推播干擾驗證**：打開筆記編輯頁至寫作期間，未主動觸發「尋找參考課程」前，Network 無任何外部課程請求，畫面無推薦卡片或通知元素。
+2. **按需並陳參考**：主動觸發「尋找參考課程」後，4 秒內於右側抽屜並陳顯示 `[開放課程]` 與 `[學術文獻]` 卡片（附標題、來源、摘要、可點擊 `http/https` 連結），可一鍵釘選存檔。
+3. **寫完自動雲端整理**：點擊「完成並歸檔」後，5 秒內完成雲端儲存，直接歸入對應 `Topic` 並標上 1–3 個標籤（失敗時安全落入 `Inbox`），且可手動改移主題。
+4. **跨設備純淨閱讀**：寬度 `< 768px` 手機視窗開啟時，預設顯示目錄／搜尋／純淨閱讀視圖，無編輯器工具列遮擋。
+5. **登出零殘留**：登出後 DB Session 作廢，瀏覽器 Cookies、`localStorage`、`sessionStorage`、`IndexedDB` 全空，按下瀏覽器「上一頁」無法看到私人筆記畫面。
+6. **打包與唯讀分享**：無痕視窗開啟 `/share/[slug]` 可免登入完整閱讀綁定筆記與參考連結（無法修改，亦無權存取其他私人筆記）；下載 `.zip` 解壓後可離線開啟各篇 `.md` 與 `references.md`。
+
+## Out of Scope (Deferred)
+以下項目明確延後至 **V2 及之後版本**，V1 實作時禁止夾帶：
+- 公開多使用者註冊、角色權限系統與商業訂閱計費
+- 離線本機 App（Desktop / iOS / Android）與本機檔案系統雙向同步
+- 手機端重度長文編輯與語音速記
+- 大型課程影片、PDF 原檔雲端託管與內嵌播放器
+- 多人即時協作編輯、留言討論串與 Git-style 版本分支
+- 知識圖譜（Graph View）視覺化動畫與第三方外掛生態系

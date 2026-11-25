@@ -1,0 +1,293 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated workspace owner profile isolated by Firebase UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 320
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "Topic": {
+      "title": "Topic",
+      "description": "Research notebook folder/topic owned by a specific user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "sortOrder": {
+          "type": "integer"
+        },
+        "isSystemInbox": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "name", "slug", "sortOrder", "isSystemInbox", "createdAt"]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "Scholarly Markdown research note owned by a specific user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "topicId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["DRAFT", "ARCHIVED"]
+        },
+        "tags": {
+          "type": "array"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "topicId", "title", "content", "status", "tags", "summary", "createdAt", "updatedAt"]
+    },
+    "CourseRef": {
+      "title": "CourseRef",
+      "description": "Pinned open courseware or academic literature reference attached to a note.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "noteId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["COURSE", "PAPER"]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["MIT_OCW", "CURATED_OCW", "OPENALEX"]
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 600
+        },
+        "url": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 1000,
+          "pattern": "^https?://.*"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "noteId", "userId", "type", "title", "provider", "summary", "url", "createdAt"]
+    },
+    "ShareBundle": {
+      "title": "ShareBundle",
+      "description": "Public read-only snapshot bundle metadata indexed by a high-entropy slug.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "noteCount": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "slug", "userId", "title", "noteCount", "createdAt"]
+    },
+    "ShareBundleItem": {
+      "title": "ShareBundleItem",
+      "description": "Read-only note snapshot inside a public share bundle.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "bundleSlug": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 100000
+        },
+        "tags": {
+          "type": "array"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "updatedAtIso": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "sortOrder": {
+          "type": "integer"
+        },
+        "courseRefs": {
+          "type": "array"
+        }
+      },
+      "required": ["id", "bundleSlug", "userId", "title", "content", "tags", "summary", "updatedAtIso", "sortOrder", "courseRefs"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private owner profile document isolated per Firebase UID."
+    },
+    "/users/{userId}/topics/{topicId}": {
+      "schema": { "$ref": "#/entities/Topic" },
+      "description": "Topics belonging to a workspace owner."
+    },
+    "/users/{userId}/notes/{noteId}": {
+      "schema": { "$ref": "#/entities/Note" },
+      "description": "Research notes belonging to a workspace owner."
+    },
+    "/users/{userId}/notes/{noteId}/course_refs/{refId}": {
+      "schema": { "$ref": "#/entities/CourseRef" },
+      "description": "Pinned course and paper references for a specific owner note."
+    },
+    "/share_bundles/{slug}": {
+      "schema": { "$ref": "#/entities/ShareBundle" },
+      "description": "Read-only share bundle metadata accessed publicly only by high-entropy slug."
+    },
+    "/share_bundles/{slug}/items/{noteId}": {
+      "schema": { "$ref": "#/entities/ShareBundleItem" },
+      "description": "Snapshot notes belonging to a public share bundle."
+    }
+  }
+}

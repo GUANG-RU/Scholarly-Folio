@@ -1,0 +1,50 @@
+# Implementation Plan — Personal Research & Note Workspace (V1)
+
+## 1. 主要組件與依賴關係（Dependency Graph）
+
+```text
+[Slice 0: 基礎設施、資安底座與品質契約]
+  PostgreSQL + Prisma Schema + Better Auth (OAuth 白名單) + DAL 權限守門
+        │
+        ├──────────────────────────┬──────────────────────────┐
+        ▼                          ▼                          ▼
+[Slice 1: 讀寫核心與登出防護] [Slice 2: 課程參考轉接器]   [Slice 3: AI 自動歸檔器]
+  極簡編輯器 / 跨裝置純淨閱讀   OpenAlex + 開放課程索引      既有主題比對 + 標籤指派
+        │                          │                          │
+        └──────────────────────────┴──────────────────────────┘
+                                   │
+                                   ▼
+                     [Slice 4: 打包與唯讀分享]
+                /share/[slug] 免登入頁 + JSZip 離線包
+```
+
+### 核心資料模型（Prisma 概念結構）
+- `User` / `Session` / `Account` / `Verification`：Better Auth 託管（關閉 `cookieCache`，強制走 DB 查詢），僅允許單一白名單 `OWNER_EMAIL` 且 `emailVerified === true` 建立登入。
+- `Topic`：`id`, `userId`, `name`, `slug`, `sortOrder`, `isSystemInbox`，所有查詢綁定 `userId`。
+- `Note`：`id`, `userId`, `topicId`, `title`, `content` (Markdown), `status` (`DRAFT` | `ARCHIVED`), `tags` (`String[]`), `summary`, `updatedAt`。
+- `CourseRef`：`id`, `noteId`, `type` (`COURSE` | `PAPER`), `title`, `provider`, `summary`, `url`。
+- `ShareBundle` + `ShareBundleNote`：`id`, `userId`, `slug`（高熵隨機碼）, `title`, `createdAt`，關聯表採 `onDelete: Cascade`。
+
+## 2. 垂直切片實作順序（Vertical-Slicing Order）
+1. **Slice 0 — 基礎設施、資安底座與品質契約（Sequential 必須最先）**：初始化專案與 `CONSTRAINTS.md`／檢查腳本校正、建置 Schema 與 `Inbox` Seed、完成 Better Auth 單人白名單登入與登出零殘留機制。
+2. **Slice 1 — 寫作與跨裝置閱讀閉環（Sequential after Slice 0）**：透過 DAL (`requireOwnerSession()`) 打通桌機極簡 Markdown 寫作、雲端載入、手機 `< 768px` 純淨閱讀模式，以及未存檔登出提醒與 bfcache 防護。
+3. **Slice 2 / 3 / 4 核心純模組（Parallel after Slice 0）**：
+   - `src/lib/courses/`：關鍵字萃取＋OpenAlex 與開放課程索引並行檢索（4 秒超時、`[開放課程]`/`[學術文獻]` 並陳標註、URL 淨化）。
+   - `src/lib/ai/`：輕量 LLM 自動歸類既有主題＋指派 1–3 個標籤（5 秒超時、失敗降級回 `Inbox`）。
+   - `src/lib/export/`：Markdown 與 `references.md` 組裝＋`JSZip` 串流打包（篇數與大小上限、檔名安全消毒）。
+4. **Slice 2–4 UI 與後端串接（Sequential after Slice 1 與對應純模組）**：按需喚醒抽屜、完成歸檔流程（含手動移動主題下拉）、`/share/[slug]` 免登入唯讀頁與 `.zip` 下載。
+
+## 3. 風險與緩解策略（Risks & Mitigations）
+| 風險項目 | 影響 | 緩解策略 |
+|---|---|---|
+| **Auth 繞過或登出後本機殘留** | 私人筆記外洩 | 禁止將 `proxy.ts` 當作安全邊界；所有 Server Action / Route Handler / DAL 強制執行 `requireOwnerSession()`；關閉 `cookieCache`；登出回傳 `Clear-Site-Data` 並清空 Storage + `pageshow` 阻擋 bfcache。 |
+| **AI 自動分類亂建資料夾** | 主題樹膨脹混亂 | Prompt 注入既有 `Topic` 清單優先比對，限制單次最多建議 1 個新主題；LLM 異常時降級進 `Inbox` 且保證內容存檔。 |
+| **外部課程 API 延遲或畸形 URL** | 拖垮寫作體驗或 XSS | `Promise.allSettled` 並行查詢＋`AbortSignal.timeout(4000)`；嚴格過濾僅允許 `http:`/`https:` URL。 |
+| **分享頁越權讀取私人筆記** | 隱私洩漏 | `ShareBundle.slug` 採 16 bytes 高熵隨機 base64url；查詢顯式使用 `select` 白名單欄位與綁定之 `noteId`。 |
+
+## 4. 階段驗證檢查點（Verification Checkpoints）
+- **Checkpoint 0（資安與底座）**：未登入呼叫私人 API／Action 一律回 `401`；非白名單或未驗證 Email 的 OAuth 登入遭拒；記錄 Slice 0 專案覆蓋率與 bundle 基準值。
+- **Checkpoint 1（跨設備讀寫與登出淨空）**：桌機存檔後於 `390x844` 手機視窗順暢閱讀無遮擋；登出後 Cookies／Storage／IndexedDB 全空且按「上一頁」無法回看筆記。
+- **Checkpoint 2（按需參考抽屜）**：未點擊按鈕前 Network 無外部課程請求；點擊後 4 秒內顯示 `[開放課程]` 與 `[學術文獻]` 卡片並成功釘選。
+- **Checkpoint 3（自動歸檔韌性）**：正常情況直接入對應 `Topic`；模擬斷網或 LLM 失敗時，筆記仍 100% 存入 `Inbox`。
+- **Checkpoint 4（打包與唯讀分享）**：無痕視窗開啟 `/share/[slug]` 僅能唯讀；下載 `.zip` 解壓後結構與 `references.md` 正確。

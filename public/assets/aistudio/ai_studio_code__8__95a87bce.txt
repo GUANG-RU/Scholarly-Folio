@@ -1,0 +1,43 @@
+# Constraints
+
+Last reviewed: 2026-11-25 by @owner
+Grace period for numbered dimensions: Warn until 2026-12-09, then Block (Floor is Block from day one).
+
+## Floor (always enforced, Block immediately)
+
+- No new suppression comments: `@ts-ignore`, `eslint-disable`, `istanbul ignore`, `nosemgrep`, `gitleaks:allow`
+- No unimplemented stubs: `throw new Error("Not implemented")`, empty `catch {}`, `TODO` replacing logic
+- No skipped or deleted tests (`.skip`, deleted test files, stripped assertions) without a reason in the commit message
+- No secrets in source
+- Security invariants (V1):
+  - Never treat `proxy.ts` as an auth boundary; every Server Action, Route Handler, and DAL method calls `requireOwnerSession()`
+  - Logout deletes DB session and leaves zero cookies, `localStorage`, `sessionStorage`, and `IndexedDB` data
+- This file (`CONSTRAINTS.md`) does not get weakened to make a change pass
+
+## Enforced with numbers
+
+| Dimension | Rule (with rationale) | Checked by | Runs at | Mode (until 2026-12-09 → after) |
+|-----------|-----------------------|-----------|---------|----------------------------------|
+| Types | Zero TypeScript errors (strict mode catches contract drift early) | `npx tsc --noEmit` | every edit | Block → Block |
+| Lint | Zero ESLint errors from project config | `npx eslint .` | every edit | Block → Block |
+| Secrets | No secrets in source (`--redact` prevents leaking secrets into agent logs) | `gitleaks dir . --redact --no-banner` | every edit | Block → Block |
+| Coverage | Changed lines ≥ 80% covered (forces tests on new code without penalizing legacy lines) | `npx vitest run --coverage && node scripts/quality-gate.mjs coverage coverage/lcov.info` | task end (≤ 90s), CI | Warn → Block |
+| Security: code | Zero High or Critical SAST findings (including legacy `ERROR`) | `npm run check:security` | CI | Warn → Block |
+| Security: deps | Zero High or Critical dependency vulnerabilities (lowers noise below High) | `osv-scanner scan source -r .` | CI | Warn → Block |
+| Accessibility | Zero Critical or Serious axe violations on WCAG 2.0/2.1 A/AA (avoids debatable Minor noise) | `npm run check:a11y` | preview deploy / E2E server | Warn → Block |
+
+> Note: `gitleaks`, `Semgrep`, `osv-scanner`, and `axe-core` provide external verification independent of our own test suite.
+> `CONSTRAINTS.md` is the canonical source of truth; `package.json` scripts mirror these commands.
+
+## Measured, not yet enforced (Ratchets)
+
+| Metric | Baseline (record at Slice 0) | Direction | Tolerance |
+|--------|------------------------------|-----------|-----------|
+| Project coverage | TBD (measure at Slice 0 completion) | must not fall | 0.5% |
+| Main JS bundle size | TBD (measure at Slice 0 completion) | track / avoid silent bloat | — |
+
+## Exceptions
+
+| ID | Rule | Path | Reason | Owner | Expires (max 90d) |
+|----|------|------|--------|-------|-------------------|
+| — | — | — | — | — | — |

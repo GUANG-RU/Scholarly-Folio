@@ -1,0 +1,10 @@
+.
+├── AGENTS.md                         # 加入必讀 CONSTRAINTS.md 指引（CLAUDE.md 同步）
+├── CONSTRAINTS.md                    # 不可削弱的品質與資安契約
+├── SPEC.md                           # V1 正式產品與技術規格書（已定案）
+├── docs/
+│   └── intent/
+│       └── academic-note-system.md   # 已確認的產品意圖聲明
+└── tasks/
+    ├── plan.md                       # Phase 2 技術架構與垂直切片實作計畫
+    └── todo.md                       # Phase 3 可勾選開發任務清單（含 5 個 Checkpoint）

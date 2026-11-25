@@ -1,0 +1,3 @@
+coverage/
+semgrep-results.json
+axe-results.json
