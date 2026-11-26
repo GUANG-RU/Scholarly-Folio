@@ -107,4 +107,60 @@ describe('export/packager', () => {
     ]);
     expect(md).toContain('尚未釘選');
   });
+
+  it('embeds real PNG images into DOCX word/media without falling back to [圖片：貼上圖片]', async () => {
+    // Valid 1x1 PNG (67 bytes)
+    const samplePngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    const dataUrl = `data:image/png;base64,${samplePngBase64}`;
+
+    const docxBytes = await createNoteDocxBuffer({
+      id: 'n-img',
+      title: '實驗截圖筆記',
+      content: [
+        '第一段說明文字',
+        `![貼上圖片](${dataUrl})`,
+        `行內附圖：![架構縮圖](${dataUrl}) 補充說明`,
+      ].join('\n'),
+      tags: ['實驗'],
+      summary: '',
+      updatedAt: '2026-11-25T00:00:00.000Z',
+      courseRefs: [],
+    });
+
+    const docxZip = await JSZip.loadAsync(docxBytes);
+    const mediaFiles = Object.keys(docxZip.files).filter((name) =>
+      name.startsWith('word/media/'),
+    );
+    expect(mediaFiles.length).toBeGreaterThanOrEqual(1);
+
+    const docXml = await docxZip.file('word/document.xml')!.async('string');
+    expect(docXml).not.toContain('[圖片：貼上圖片]');
+    expect(docXml).not.toContain('[圖片：架構縮圖]');
+    expect(docXml).toContain('<w:drawing>');
+  });
+
+  it('renders single-newline and inline images cleanly in HTML and plain-text exports', async () => {
+    const { buildNoteHtml, buildNotePlainText } = await import('../../src/lib/export/docx.ts');
+    const samplePng =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+
+    const note = {
+      id: 'n-html',
+      title: '圖片排版測試',
+      content: `前文說明\n![貼上圖片](${samplePng})\n後文段落`,
+      tags: [],
+      summary: '',
+      updatedAt: '2026-11-25T00:00:00.000Z',
+      courseRefs: [],
+    };
+
+    const html = buildNoteHtml(note);
+    expect(html).toContain(`<img src="${samplePng}"`);
+    expect(html).not.toContain('![貼上圖片]');
+
+    const txt = buildNotePlainText(note);
+    expect(txt).toContain('[圖片：貼上圖片]');
+    expect(txt).not.toContain('![貼上圖片]');
+  });
 });

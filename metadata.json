@@ -1,6 +1,6 @@
 {
   "name": "Scholarly Folio — 零干擾研究筆記工作台",
   "description": "零社交干擾的雲端學術研究筆記與課程靈感工作台，支援按需檢索公開課程與學術文獻、AI 自動歸檔整理、跨裝置純淨閱讀與一鍵打包唯讀分享。",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

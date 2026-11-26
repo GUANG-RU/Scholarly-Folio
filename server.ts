@@ -6,13 +6,20 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { z } from 'zod';
 import { autoOrganizeNote } from './src/lib/ai/organizer.ts';
+import { generateMindMapFromText, MindMapError } from './src/lib/ai/mindmap.ts';
+import { transcribeAudio, TranscriptionError } from './src/lib/ai/transcribe.ts';
 import { fetchOnDemandCourseRefs } from './src/lib/courses/index.ts';
+import {
+  importDriveFileContent,
+  listDriveReadableFiles,
+} from './src/lib/drive/import.ts';
 import {
   createDriveFolder,
   DriveApiError,
   exportNotesToDriveFolders,
   listDriveFolders,
 } from './src/lib/drive/upload.ts';
+import { ImportParseError, parseImportedDocument } from './src/lib/import/parser.ts';
 import { createNoteDocxBuffer } from './src/lib/export/docx.ts';
 import {
   createNotesZipBuffer,
@@ -83,9 +90,19 @@ const DriveExportSchema = z.object({
   format: z.enum(['docx', 'gdoc', 'md', 'txt', 'zip']).default('docx'),
 });
 
+const LocalImportParseSchema = z.object({
+  filename: z.string().trim().min(1).max(260),
+  mimeType: z.string().max(200).optional().default(''),
+  base64: z.string().min(1).max(18_000_000),
+});
+
+const DriveImportSchema = z.object({
+  fileId: z.string().trim().min(3).max(200),
+});
+
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '6mb' }));
+  app.use(express.json({ limit: '25mb' }));
 
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true });
@@ -142,6 +159,34 @@ async function startServer() {
     } catch (error) {
       console.error('POST /api/ai/organize failed:', error);
       return res.status(500).json({ error: 'AI 自動歸檔失敗' });
+    }
+  });
+
+  app.post('/api/audio/transcribe', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    try {
+      const result = await transcribeAudio(req.body);
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof TranscriptionError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('POST /api/audio/transcribe failed:', error);
+      return res.status(500).json({ error: '語音轉逐字稿發生未預期錯誤' });
+    }
+  });
+
+  app.post('/api/ai/mindmap', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    try {
+      const result = await generateMindMapFromText(req.body);
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof MindMapError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('POST /api/ai/mindmap failed:', error);
+      return res.status(500).json({ error: '生成心智圖發生未預期錯誤' });
     }
   });
 
@@ -272,6 +317,109 @@ async function startServer() {
       });
     }
   });
+
+  app.post('/api/import/parse', async (req, res) => {
+    res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    const parsed = LocalImportParseSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: '請選擇有效的筆記檔案（上限 10 MB）' });
+    }
+    try {
+      const bytes = Buffer.from(parsed.data.base64, 'base64');
+      const result = await parseImportedDocument({
+        filename: parsed.data.filename,
+        mimeType: parsed.data.mimeType,
+        bytes,
+      });
+      return res.json(result);
+    } catch (error) {
+      if (error instanceof ImportParseError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('POST /api/import/parse failed:', error);
+      return res.status(500).json({ error: '解析筆記檔案失敗' });
+    }
+  });
+
+  app.get('/api/drive/files', requireOwnerSession, async (req: OwnerAuthRequest, res) => {
+    const driveToken = req.header('X-Drive-Access-Token')?.trim();
+    if (!driveToken) {
+      return res.status(401).json({
+        error: '請先授權 Google Drive 存取權限',
+        code: 'DRIVE_TOKEN_EXPIRED',
+      });
+    }
+    try {
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      const files = await listDriveReadableFiles(driveToken, q);
+      return res.json({ files });
+    } catch (error) {
+      console.error('GET /api/drive/files failed:', error);
+      if (error instanceof DriveApiError) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
+      return res.status(502).json({
+        error: error instanceof Error ? error.message : '無法讀取 Google Drive 筆記檔案',
+      });
+    }
+  });
+
+  app.post('/api/drive/import', requireOwnerSession, async (req: OwnerAuthRequest, res) => {
+    const driveToken = req.header('X-Drive-Access-Token')?.trim();
+    if (!driveToken) {
+      return res.status(401).json({
+        error: '請先授權 Google Drive 存取權限',
+        code: 'DRIVE_TOKEN_EXPIRED',
+      });
+    }
+    const parsed = DriveImportSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: '請選擇有效的 Google Drive 檔案' });
+    }
+    try {
+      const imported = await importDriveFileContent(driveToken, parsed.data.fileId);
+      return res.json(imported);
+    } catch (error) {
+      console.error('POST /api/drive/import failed:', error);
+      if (error instanceof DriveApiError) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
+      if (error instanceof ImportParseError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      return res.status(502).json({
+        error: error instanceof Error ? error.message : '從 Google Drive 匯入檔案失敗',
+      });
+    }
+  });
+
+  app.all('/api/*', (_req, res) => {
+    return res.status(404).json({ error: '找不到指定的 API 端點' });
+  });
+
+  app.use(
+    '/api',
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      next: express.NextFunction,
+    ) => {
+      if (!err) {
+        next();
+        return;
+      }
+      const typed = err as { status?: number; type?: string };
+      const status = typeof typed.status === 'number' ? typed.status : 400;
+      if (status === 413 || typed.type === 'entity.too.large') {
+        res.status(413).json({
+          error: '上傳的檔案內容過大，請縮減檔案大小後再試一次。',
+        });
+        return;
+      }
+      res.status(status).json({ error: '請求內容格式異常，請重新再試一次。' });
+    },
+  );
 
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {

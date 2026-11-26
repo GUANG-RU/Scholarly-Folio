@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
 import {
-  buildNoteHtml,
   buildNotePlainText,
   createNoteDocxBuffer,
 } from '../export/docx.ts';
@@ -307,8 +306,9 @@ export async function exportNotesToDriveFolders(
     } else if (format === 'gdoc') {
       fileName = note.title.trim().slice(0, 120) || '未命名研究筆記';
       targetMimeType = 'application/vnd.google-apps.document';
-      uploadMimeType = 'text/html; charset=UTF-8';
-      contentBytes = Buffer.from(buildNoteHtml(note), 'utf8');
+      uploadMimeType =
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+      contentBytes = await createNoteDocxBuffer(note);
     } else if (format === 'md') {
       fileName = `${baseName}.md`;
       targetMimeType = 'text/markdown';

@@ -4,12 +4,16 @@ import {
   Archive,
   BookOpen,
   Cloud,
+  Columns2,
   Compass,
   ExternalLink,
   Eye,
+  FileUp,
   FolderPlus,
   LogOut,
   Menu,
+  Mic,
+  Network,
   Package,
   PenLine,
   Plus,
@@ -46,20 +50,47 @@ import {
   syncGuestWorkspaceToFirestore,
 } from '../lib/guest-workspace.ts';
 import { performZeroResidueLogout } from '../lib/logout.ts';
+import { compressImageFileToDataUrl, MAX_NOTE_CONTENT_CHARS } from '../lib/image-utils.ts';
+import {
+  canRedoHistory,
+  canUndoHistory,
+  createNoteHistory,
+  recordNoteEdit,
+  redoNoteHistory,
+  undoNoteHistory,
+  type NoteHistoryState,
+} from '../lib/note-history.ts';
 import type {
   CourseRefItem,
   CourseSearchResultItem,
+  ImportedDocumentPreview,
+  ImportedReferenceDoc,
   NoteItem,
   ShareBundleItem,
   TopicItem,
 } from '../types/workspace.ts';
 import { CloudSignInModal } from './CloudSignInModal.tsx';
+import { EditorFormattingBar } from './EditorFormattingBar.tsx';
+import { ImportNoteModal, type ImportUseMode } from './ImportNoteModal.tsx';
 import { LogoutConfirmModal } from './LogoutConfirmModal.tsx';
 import { MarkdownReader } from './MarkdownReader.tsx';
+import { MindMapModal } from './MindMapModal.tsx';
 import { PackShareModal } from './PackShareModal.tsx';
 import { ReferenceDrawer } from './ReferenceDrawer.tsx';
+import {
+  VisualMarkdownEditor,
+  type EditorSelectionRequest,
+} from './VisualMarkdownEditor.tsx';
+import { VoiceTranscriptPanel } from './VoiceTranscriptPanel.tsx';
 
-type PendingCloudAction = 'signin' | 'save' | 'archive' | 'pack_share' | 'pack_drive' | null;
+type PendingCloudAction =
+  | 'signin'
+  | 'save'
+  | 'archive'
+  | 'pack_share'
+  | 'pack_drive'
+  | 'import_drive'
+  | null;
 
 type WorkspaceViewProps = {
   user: User | null;
@@ -89,6 +120,7 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
   const [isReadMode, setIsReadMode] = useState<boolean>(() =>
     typeof window !== 'undefined' ? window.innerWidth < 768 : false,
   );
+  const [isSplitPreview, setIsSplitPreview] = useState<boolean>(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const [newTopicOpen, setNewTopicOpen] = useState(false);
@@ -104,6 +136,8 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
 
   // On-demand Reference Drawer state (strictly closed & silent by default)
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [drawerMode, setDrawerMode] = useState<'courses' | 'doc'>('courses');
+  const [importedRefDoc, setImportedRefDoc] = useState<ImportedReferenceDoc | null>(null);
   const [drawerLoading, setDrawerLoading] = useState(false);
   const [drawerKeywords, setDrawerKeywords] = useState('');
   const [drawerItems, setDrawerItems] = useState<CourseSearchResultItem[]>([]);
@@ -112,6 +146,13 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
 
   const [packModalOpen, setPackModalOpen] = useState(false);
   const [packInitialTab, setPackInitialTab] = useState<'drive' | 'share' | undefined>(undefined);
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  const [importInitialTab, setImportInitialTab] = useState<'local' | 'drive' | undefined>(undefined);
+  const [mindMapModalOpen, setMindMapModalOpen] = useState(false);
+  const [mindMapInitialSource, setMindMapInitialSource] = useState<'selection' | 'note' | 'voice'>('note');
+  const [mindMapSelectionText, setMindMapSelectionText] = useState('');
+  const [mindMapVoiceText, setMindMapVoiceText] = useState('');
+  const [voicePanelOpen, setVoicePanelOpen] = useState(false);
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
   const [loggingOutWithSave, setLoggingOutWithSave] = useState(false);
 
@@ -121,6 +162,11 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
   const [pendingCloudAction, setPendingCloudAction] = useState<PendingCloudAction>(null);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const editorContainerRef = useRef<HTMLDivElement | null>(null);
+  const editorSelectionRef = useRef<{ start: number; end: number }>({ start: 0, end: 0 });
+  const noteHistoriesRef = useRef<Map<string, NoteHistoryState>>(new Map());
+  const [historyTick, setHistoryTick] = useState(0);
+  const [selectionRequest, setSelectionRequest] = useState<EditorSelectionRequest | null>(null);
   const signInModalOpenRef = useRef(false);
   const prevUserUidRef = useRef<string | null | undefined>(undefined);
 
@@ -128,6 +174,18 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
     () => notes.find((n) => n.id === activeNoteId) ?? null,
     [notes, activeNoteId],
   );
+
+  const canUndo = useMemo(() => {
+    void historyTick;
+    if (!activeNoteId) return false;
+    return canUndoHistory(noteHistoriesRef.current.get(activeNoteId));
+  }, [activeNoteId, historyTick]);
+
+  const canRedo = useMemo(() => {
+    void historyTick;
+    if (!activeNoteId) return false;
+    return canRedoHistory(noteHistoriesRef.current.get(activeNoteId));
+  }, [activeNoteId, historyTick]);
 
   const isDirty = useMemo(() => {
     if (!activeNote || !isAuthenticated) return false;
@@ -171,6 +229,7 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
 
   const loadLocalGuestState = useCallback(() => {
     const guest = loadGuestWorkspace();
+    noteHistoriesRef.current.clear();
     setOwnerEmail('');
     setTopics(guest.topics);
     setNotes(guest.notes);
@@ -178,14 +237,22 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
     setSelectedTopicFilter('ALL');
     setSearchQuery('');
     if (guest.notes.length > 0) {
-      setActiveNoteId(guest.notes[0].id);
-      setDraftTitle(guest.notes[0].title);
-      setDraftContent(guest.notes[0].content);
+      const first = guest.notes[0];
+      noteHistoriesRef.current.set(
+        first.id,
+        createNoteHistory({ title: first.title, content: first.content }),
+      );
+      editorSelectionRef.current = { start: first.content.length, end: first.content.length };
+      setActiveNoteId(first.id);
+      setDraftTitle(first.title);
+      setDraftContent(first.content);
     } else {
+      editorSelectionRef.current = { start: 0, end: 0 };
       setActiveNoteId(null);
       setDraftTitle('');
       setDraftContent('');
     }
+    setHistoryTick((t) => t + 1);
     setLoadError(null);
     setLoading(false);
   }, []);
@@ -199,6 +266,7 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
           onUnauthorized('請使用已完成 Email 驗證的 Google 帳號登入');
           return;
         }
+        noteHistoriesRef.current.clear();
         if (hasStoredGuestWorkspace()) {
           const guest = loadGuestWorkspace();
           const synced = await syncGuestWorkspaceToFirestore(
@@ -216,6 +284,16 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
             synced.notes.find((n) => n.id === synced.mappedActiveNoteId) ??
             synced.notes[0] ??
             null;
+          if (targetActive) {
+            noteHistoriesRef.current.set(
+              targetActive.id,
+              createNoteHistory({ title: targetActive.title, content: targetActive.content }),
+            );
+            editorSelectionRef.current = {
+              start: targetActive.content.length,
+              end: targetActive.content.length,
+            };
+          }
           setActiveNoteId(targetActive?.id ?? null);
           setDraftTitle(targetActive?.title ?? '');
           setDraftContent(targetActive?.content ?? '');
@@ -227,15 +305,25 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
           setShareBundles(data.shareBundles);
           if (data.notes.length > 0) {
             const first = data.notes[0];
+            noteHistoriesRef.current.set(
+              first.id,
+              createNoteHistory({ title: first.title, content: first.content }),
+            );
+            editorSelectionRef.current = {
+              start: first.content.length,
+              end: first.content.length,
+            };
             setActiveNoteId(first.id);
             setDraftTitle(first.title);
             setDraftContent(first.content);
           } else {
+            editorSelectionRef.current = { start: 0, end: 0 };
             setActiveNoteId(null);
             setDraftTitle('');
             setDraftContent('');
           }
         }
+        setHistoryTick((t) => t + 1);
       } catch (err) {
         setLoadError(err instanceof Error ? err.message : '無法載入工作區');
       } finally {
@@ -279,9 +367,17 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
 
   const selectNote = useCallback(
     (note: NoteItem) => {
+      if (!noteHistoriesRef.current.has(note.id)) {
+        noteHistoriesRef.current.set(
+          note.id,
+          createNoteHistory({ title: note.title, content: note.content }),
+        );
+      }
+      editorSelectionRef.current = { start: note.content.length, end: note.content.length };
       setActiveNoteId(note.id);
       setDraftTitle(note.title);
       setDraftContent(note.content);
+      setHistoryTick((t) => t + 1);
       setConfirmDeleteId(null);
       setFeedbackNotice(null);
       if (isMobileViewport) {
@@ -292,38 +388,200 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
     [isMobileViewport],
   );
 
-  const handleDraftTitleChange = useCallback(
-    (nextTitle: string) => {
+  const commitOrRecordDraft = useCallback(
+    (
+      nextTitle: string,
+      nextContent: string,
+      options: {
+        mode: 'typing' | 'commit';
+        selectionStart?: number;
+        selectionEnd?: number;
+        syncCursor?: boolean;
+      },
+    ) => {
+      if (activeNoteId) {
+        const existing =
+          noteHistoriesRef.current.get(activeNoteId) ??
+          createNoteHistory({ title: draftTitle, content: draftContent });
+        const nextHistory = recordNoteEdit(
+          existing,
+          {
+            title: nextTitle,
+            content: nextContent,
+            selectionStart: options.selectionStart,
+            selectionEnd: options.selectionEnd,
+          },
+          { mode: options.mode },
+        );
+        noteHistoriesRef.current.set(activeNoteId, nextHistory);
+        setHistoryTick((t) => t + 1);
+      }
+
+      if (options.selectionStart !== undefined) {
+        const selEnd = options.selectionEnd ?? options.selectionStart;
+        editorSelectionRef.current = { start: options.selectionStart, end: selEnd };
+        if (options.syncCursor) {
+          setSelectionRequest({
+            start: options.selectionStart,
+            end: selEnd,
+            token: Date.now() + Math.random(),
+          });
+        }
+      }
+
       setDraftTitle(nextTitle);
+      setDraftContent(nextContent);
+
       if (!isAuthenticated && activeNoteId) {
         const nowIso = new Date().toISOString();
         setNotes((prev) => {
           const updated = prev.map((n) =>
-            n.id === activeNoteId ? { ...n, title: nextTitle, updatedAt: nowIso } : n,
+            n.id === activeNoteId
+              ? { ...n, title: nextTitle, content: nextContent, updatedAt: nowIso }
+              : n,
           );
           saveGuestWorkspace(topics, updated);
           return updated;
         });
       }
     },
-    [isAuthenticated, activeNoteId, topics],
+    [activeNoteId, draftTitle, draftContent, isAuthenticated, topics],
   );
 
-  const handleDraftContentChange = useCallback(
-    (nextContent: string) => {
-      setDraftContent(nextContent);
-      if (!isAuthenticated && activeNoteId) {
-        const nowIso = new Date().toISOString();
-        setNotes((prev) => {
-          const updated = prev.map((n) =>
-            n.id === activeNoteId ? { ...n, content: nextContent, updatedAt: nowIso } : n,
-          );
-          saveGuestWorkspace(topics, updated);
-          return updated;
-        });
-      }
+  const handleUndo = useCallback(() => {
+    if (!activeNoteId) return;
+    const existing =
+      noteHistoriesRef.current.get(activeNoteId) ??
+      createNoteHistory({ title: draftTitle, content: draftContent });
+    const { nextState, snapshot } = undoNoteHistory(existing);
+    if (!snapshot) return;
+
+    noteHistoriesRef.current.set(activeNoteId, nextState);
+    setHistoryTick((t) => t + 1);
+    setDraftTitle(snapshot.title);
+    setDraftContent(snapshot.content);
+
+    const targetStart = snapshot.selectionStart ?? snapshot.content.length;
+    const targetEnd = snapshot.selectionEnd ?? targetStart;
+    editorSelectionRef.current = { start: targetStart, end: targetEnd };
+    setSelectionRequest({
+      start: targetStart,
+      end: targetEnd,
+      token: Date.now() + Math.random(),
+    });
+
+    if (!isAuthenticated) {
+      const nowIso = new Date().toISOString();
+      setNotes((prev) => {
+        const updated = prev.map((n) =>
+          n.id === activeNoteId
+            ? { ...n, title: snapshot.title, content: snapshot.content, updatedAt: nowIso }
+            : n,
+        );
+        saveGuestWorkspace(topics, updated);
+        return updated;
+      });
+    }
+  }, [activeNoteId, draftTitle, draftContent, isAuthenticated, topics]);
+
+  const handleRedo = useCallback(() => {
+    if (!activeNoteId) return;
+    const existing =
+      noteHistoriesRef.current.get(activeNoteId) ??
+      createNoteHistory({ title: draftTitle, content: draftContent });
+    const { nextState, snapshot } = redoNoteHistory(existing);
+    if (!snapshot) return;
+
+    noteHistoriesRef.current.set(activeNoteId, nextState);
+    setHistoryTick((t) => t + 1);
+    setDraftTitle(snapshot.title);
+    setDraftContent(snapshot.content);
+
+    const targetStart = snapshot.selectionStart ?? snapshot.content.length;
+    const targetEnd = snapshot.selectionEnd ?? targetStart;
+    editorSelectionRef.current = { start: targetStart, end: targetEnd };
+    setSelectionRequest({
+      start: targetStart,
+      end: targetEnd,
+      token: Date.now() + Math.random(),
+    });
+
+    if (!isAuthenticated) {
+      const nowIso = new Date().toISOString();
+      setNotes((prev) => {
+        const updated = prev.map((n) =>
+          n.id === activeNoteId
+            ? { ...n, title: snapshot.title, content: snapshot.content, updatedAt: nowIso }
+            : n,
+        );
+        saveGuestWorkspace(topics, updated);
+        return updated;
+      });
+    }
+  }, [activeNoteId, draftTitle, draftContent, isAuthenticated, topics]);
+
+  const handleDraftTitleChange = useCallback(
+    (nextTitle: string) => {
+      commitOrRecordDraft(nextTitle, draftContent, { mode: 'typing' });
     },
-    [isAuthenticated, activeNoteId, topics],
+    [commitOrRecordDraft, draftContent],
+  );
+
+  const handleEditorTypingChange = useCallback(
+    (nextContent: string, selectionStart: number, selectionEnd: number) => {
+      commitOrRecordDraft(draftTitle, nextContent, {
+        mode: 'typing',
+        selectionStart,
+        selectionEnd,
+      });
+    },
+    [commitOrRecordDraft, draftTitle],
+  );
+
+  const handleEditorCommitChange = useCallback(
+    (nextContent: string, selectionStart: number, selectionEnd: number) => {
+      commitOrRecordDraft(draftTitle, nextContent, {
+        mode: 'commit',
+        selectionStart,
+        selectionEnd,
+        syncCursor: true,
+      });
+    },
+    [commitOrRecordDraft, draftTitle],
+  );
+
+  const handleInsertTranscript = useCallback(
+    (transcriptText: string) => {
+      const clean = transcriptText.trim();
+      if (!clean) return;
+
+      let nextContent: string;
+      let cursorPos: number;
+      if (!isReadMode) {
+        const start = Math.max(0, Math.min(draftContent.length, editorSelectionRef.current.start));
+        const end = Math.max(start, Math.min(draftContent.length, editorSelectionRef.current.end));
+        const before = draftContent.slice(0, start);
+        const after = draftContent.slice(end);
+        const prefix = before.length > 0 && !before.endsWith('\n') ? '\n\n' : '';
+        const suffix = after.length > 0 && !after.startsWith('\n') ? '\n\n' : '';
+        nextContent = `${before}${prefix}${clean}${suffix}${after}`;
+        cursorPos = before.length + prefix.length + clean.length;
+      } else {
+        const trimmedEnd = draftContent.trimEnd();
+        nextContent = trimmedEnd ? `${trimmedEnd}\n\n${clean}` : clean;
+        cursorPos = nextContent.length;
+      }
+
+      commitOrRecordDraft(draftTitle, nextContent, {
+        mode: 'commit',
+        selectionStart: cursorPos,
+        selectionEnd: cursorPos,
+        syncCursor: true,
+      });
+      setIsReadMode(false);
+      setFeedbackNotice({ tone: 'neutral', text: '已將語音逐字稿插入筆記內容。' });
+    },
+    [draftTitle, draftContent, isReadMode, commitOrRecordDraft],
   );
 
   const handleCreateNote = useCallback(async () => {
@@ -343,6 +601,11 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
         updatedAt: nowIso,
         courseRefs: [],
       };
+      noteHistoriesRef.current.set(
+        guestNote.id,
+        createNoteHistory({ title: guestNote.title, content: guestNote.content }),
+      );
+      editorSelectionRef.current = { start: 0, end: 0 };
       setNotes((prev) => {
         const next = [guestNote, ...prev];
         saveGuestWorkspace(topics, next);
@@ -351,6 +614,7 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
       setActiveNoteId(guestNote.id);
       setDraftTitle(guestNote.title);
       setDraftContent(guestNote.content);
+      setHistoryTick((t) => t + 1);
       setIsReadMode(false);
       setMobileNavOpen(false);
       setFeedbackNotice({ tone: 'neutral', text: '已建立新本機筆記草稿' });
@@ -365,10 +629,16 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
         content: '',
         topicId: targetTopicId,
       });
+      noteHistoriesRef.current.set(
+        createdNote.id,
+        createNoteHistory({ title: createdNote.title, content: createdNote.content }),
+      );
+      editorSelectionRef.current = { start: 0, end: 0 };
       setNotes((prev) => [createdNote, ...prev]);
       setActiveNoteId(createdNote.id);
       setDraftTitle(createdNote.title);
       setDraftContent(createdNote.content);
+      setHistoryTick((t) => t + 1);
       setIsReadMode(false);
       setMobileNavOpen(false);
       setFeedbackNotice({ tone: 'neutral', text: '已建立新筆記草稿' });
@@ -379,6 +649,278 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
       });
     }
   }, [isAuthenticated, selectedTopicFilter, topics]);
+
+  const createNoteWithContent = useCallback(
+    async (title: string, content: string, noticeText: string) => {
+      const targetTopicId = selectedTopicFilter !== 'ALL' ? selectedTopicFilter : 'inbox';
+      const cleanTitle = title.trim().slice(0, 200) || '匯入的研究筆記';
+      const cleanContent = content.slice(0, 100000);
+
+      if (!isAuthenticated) {
+        const nowIso = new Date().toISOString();
+        const guestNote: NoteItem = {
+          id: `guest-note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          topicId: targetTopicId,
+          title: cleanTitle,
+          content: cleanContent,
+          status: 'DRAFT',
+          tags: [],
+          summary: '',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          courseRefs: [],
+        };
+        noteHistoriesRef.current.set(
+          guestNote.id,
+          createNoteHistory({ title: guestNote.title, content: guestNote.content }),
+        );
+        editorSelectionRef.current = {
+          start: guestNote.content.length,
+          end: guestNote.content.length,
+        };
+        setNotes((prev) => {
+          const next = [guestNote, ...prev];
+          saveGuestWorkspace(topics, next);
+          return next;
+        });
+        setActiveNoteId(guestNote.id);
+        setDraftTitle(guestNote.title);
+        setDraftContent(guestNote.content);
+        setHistoryTick((t) => t + 1);
+        setIsReadMode(false);
+        setMobileNavOpen(false);
+        setFeedbackNotice({ tone: 'neutral', text: noticeText });
+        return;
+      }
+
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      const createdNote = await createFirestoreNote(uid, {
+        title: cleanTitle,
+        content: cleanContent,
+        topicId: targetTopicId,
+      });
+      noteHistoriesRef.current.set(
+        createdNote.id,
+        createNoteHistory({ title: createdNote.title, content: createdNote.content }),
+      );
+      editorSelectionRef.current = {
+        start: createdNote.content.length,
+        end: createdNote.content.length,
+      };
+      setNotes((prev) => [createdNote, ...prev]);
+      setActiveNoteId(createdNote.id);
+      setDraftTitle(createdNote.title);
+      setDraftContent(createdNote.content);
+      setHistoryTick((t) => t + 1);
+      setIsReadMode(false);
+      setMobileNavOpen(false);
+      setFeedbackNotice({ tone: 'neutral', text: noticeText });
+    },
+    [isAuthenticated, selectedTopicFilter, topics],
+  );
+
+  const insertContentIntoActiveNote = useCallback(
+    (incomingText: string, noticeText: string) => {
+      const clean = incomingText.trim();
+      if (!clean) return;
+
+      let nextContent: string;
+      let cursorPos: number;
+      if (!isReadMode) {
+        const start = Math.max(0, Math.min(draftContent.length, editorSelectionRef.current.start));
+        const end = Math.max(start, Math.min(draftContent.length, editorSelectionRef.current.end));
+        const before = draftContent.slice(0, start);
+        const after = draftContent.slice(end);
+        const prefix = before.length > 0 && !before.endsWith('\n') ? '\n\n' : '';
+        const suffix = after.length > 0 && !after.startsWith('\n') ? '\n\n' : '';
+        nextContent = `${before}${prefix}${clean}${suffix}${after}`;
+        cursorPos = Math.min(MAX_NOTE_CONTENT_CHARS, before.length + prefix.length + clean.length);
+      } else {
+        const trimmedEnd = draftContent.trimEnd();
+        nextContent = trimmedEnd ? `${trimmedEnd}\n\n${clean}` : clean;
+        cursorPos = Math.min(MAX_NOTE_CONTENT_CHARS, nextContent.length);
+      }
+
+      commitOrRecordDraft(draftTitle, nextContent.slice(0, MAX_NOTE_CONTENT_CHARS), {
+        mode: 'commit',
+        selectionStart: cursorPos,
+        selectionEnd: cursorPos,
+        syncCursor: true,
+      });
+      setIsReadMode(false);
+      setFeedbackNotice({ tone: 'neutral', text: noticeText });
+    },
+    [draftTitle, draftContent, isReadMode, commitOrRecordDraft],
+  );
+
+  const handleApplyLinePrefix = useCallback(
+    (prefix: string) => {
+      const start = Math.max(0, Math.min(draftContent.length, editorSelectionRef.current.start));
+      const lineStart = draftContent.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+      const lineEndRaw = draftContent.indexOf('\n', start);
+      const lineEnd = lineEndRaw === -1 ? draftContent.length : lineEndRaw;
+      const currentLine = draftContent.slice(lineStart, lineEnd);
+
+      const strippedLine = currentLine.replace(/^(?:#{1,4}>?\s+|[-*+]\s+|\d+\.\s+)/, '');
+      const nextLine = currentLine.startsWith(prefix) ? strippedLine : `${prefix}${strippedLine}`;
+      const nextContent = `${draftContent.slice(0, lineStart)}${nextLine}${draftContent.slice(lineEnd)}`;
+
+      if (nextContent.length > MAX_NOTE_CONTENT_CHARS) {
+        setFeedbackNotice({ tone: 'warn', text: '筆記內容已達 100,000 字元上限。' });
+        return;
+      }
+      const cursorPos = lineStart + nextLine.length;
+      commitOrRecordDraft(draftTitle, nextContent, {
+        mode: 'commit',
+        selectionStart: cursorPos,
+        selectionEnd: cursorPos,
+        syncCursor: true,
+      });
+    },
+    [draftTitle, draftContent, commitOrRecordDraft],
+  );
+
+  const handleWrapSelection = useCallback(
+    (before: string, after: string, placeholder: string) => {
+      const start = Math.max(0, Math.min(draftContent.length, editorSelectionRef.current.start));
+      const end = Math.max(start, Math.min(draftContent.length, editorSelectionRef.current.end));
+      const selected = draftContent.slice(start, end) || placeholder;
+      const nextContent = `${draftContent.slice(0, start)}${before}${selected}${after}${draftContent.slice(end)}`;
+
+      if (nextContent.length > MAX_NOTE_CONTENT_CHARS) {
+        setFeedbackNotice({ tone: 'warn', text: '筆記內容已達 100,000 字元上限。' });
+        return;
+      }
+      const selStart = start + before.length;
+      const selEnd = selStart + selected.length;
+      commitOrRecordDraft(draftTitle, nextContent, {
+        mode: 'commit',
+        selectionStart: selStart,
+        selectionEnd: selEnd,
+        syncCursor: true,
+      });
+    },
+    [draftTitle, draftContent, commitOrRecordDraft],
+  );
+
+  const handleInsertBlockAtRange = useCallback(
+    (blockText: string, rangeStart: number, rangeEnd: number) => {
+      const start = Math.max(0, Math.min(draftContent.length, rangeStart));
+      const end = Math.max(start, Math.min(draftContent.length, rangeEnd));
+      const before = draftContent.slice(0, start);
+      const after = draftContent.slice(end);
+      const prefix =
+        before.length > 0 && !before.endsWith('\n\n')
+          ? before.endsWith('\n')
+            ? '\n'
+            : '\n\n'
+          : '';
+      const suffix = after.length > 0 && !after.startsWith('\n') ? '\n\n' : '';
+      const nextContent = `${before}${prefix}${blockText}${suffix}${after}`;
+
+      if (nextContent.length > MAX_NOTE_CONTENT_CHARS) {
+        setFeedbackNotice({
+          tone: 'warn',
+          text: '加入此區塊後將超過單篇筆記 100,000 字元儲存上限，建議改用外部圖片網址或拆分成兩篇筆記。',
+        });
+        return;
+      }
+      const pos = before.length + prefix.length + blockText.length + suffix.length;
+      commitOrRecordDraft(draftTitle, nextContent, {
+        mode: 'commit',
+        selectionStart: pos,
+        selectionEnd: pos,
+        syncCursor: true,
+      });
+    },
+    [draftTitle, draftContent, commitOrRecordDraft],
+  );
+
+  const handleInsertBlock = useCallback(
+    (blockText: string) => {
+      handleInsertBlockAtRange(
+        blockText,
+        editorSelectionRef.current.start,
+        editorSelectionRef.current.end,
+      );
+    },
+    [handleInsertBlockAtRange],
+  );
+
+  const handlePasteImageFile = useCallback(
+    async (file: File, globalStart: number, globalEnd: number) => {
+      try {
+        const { dataUrl } = await compressImageFileToDataUrl(file);
+        handleInsertBlockAtRange(`![貼上圖片](${dataUrl})`, globalStart, globalEnd);
+        setFeedbackNotice({ tone: 'neutral', text: '已將剪貼簿圖片壓縮並插入筆記。' });
+      } catch (err) {
+        setFeedbackNotice({
+          tone: 'error',
+          text: err instanceof Error ? err.message : '貼上圖片失敗',
+        });
+      }
+    },
+    [handleInsertBlockAtRange],
+  );
+
+  const openMindMapFromEditor = useCallback(() => {
+    let selected = '';
+    if (!isReadMode) {
+      const s = Math.max(0, Math.min(draftContent.length, editorSelectionRef.current.start));
+      const e = Math.max(s, Math.min(draftContent.length, editorSelectionRef.current.end));
+      if (e > s) {
+        selected = draftContent.slice(s, e).trim();
+      }
+    }
+    setMindMapSelectionText(selected);
+    setMindMapInitialSource(selected.length >= 10 ? 'selection' : 'note');
+    setMindMapModalOpen(true);
+  }, [draftContent, isReadMode]);
+
+  const openMindMapFromVoice = useCallback((transcriptText: string) => {
+    setMindMapVoiceText(transcriptText.trim());
+    setMindMapSelectionText('');
+    setMindMapInitialSource('voice');
+    setMindMapModalOpen(true);
+  }, []);
+
+  const handleApplyImport = useCallback(
+    async (doc: ImportedDocumentPreview, mode: ImportUseMode) => {
+      if (mode === 'new_note') {
+        await createNoteWithContent(
+          doc.title,
+          doc.content,
+          `已從「${doc.sourceName}」建立新筆記，可立即編輯或儲存至雲端。`,
+        );
+        return;
+      }
+
+      if (mode === 'insert_current') {
+        insertContentIntoActiveNote(
+          doc.content,
+          `已將「${doc.sourceName}」內容插入目前筆記。`,
+        );
+        return;
+      }
+
+      const sourcePrefix = doc.sourceKind === 'drive' ? 'Google Drive' : '本地檔案';
+      setImportedRefDoc({
+        title: doc.title,
+        content: doc.content,
+        sourceLabel: `${sourcePrefix} · ${doc.formatLabel} · ${doc.sourceName}`,
+        webViewLink: doc.webViewLink,
+      });
+      setDrawerMode('doc');
+      setDrawerOpen(true);
+      setMobileNavOpen(false);
+      setFeedbackNotice({
+        tone: 'neutral',
+        text: `已在右側開啟「${doc.title}」作為對照參考。`,
+      });
+    },
+    [createNoteWithContent, insertContentIntoActiveNote],
+  );
 
   const handleSaveDraft = useCallback(async (): Promise<boolean> => {
     if (!activeNote) return false;
@@ -575,9 +1117,28 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
         synced.notes.find((n) => n.id === synced.mappedActiveNoteId) ??
         synced.notes[0] ??
         null;
+      const prevActiveHistory = activeNoteId
+        ? noteHistoriesRef.current.get(activeNoteId)
+        : undefined;
+      noteHistoriesRef.current.clear();
+      if (syncedActiveNote) {
+        noteHistoriesRef.current.set(
+          syncedActiveNote.id,
+          prevActiveHistory ??
+            createNoteHistory({
+              title: syncedActiveNote.title,
+              content: syncedActiveNote.content,
+            }),
+        );
+        editorSelectionRef.current = {
+          start: syncedActiveNote.content.length,
+          end: syncedActiveNote.content.length,
+        };
+      }
       setActiveNoteId(syncedActiveNote?.id ?? null);
       setDraftTitle(syncedActiveNote?.title ?? '');
       setDraftContent(syncedActiveNote?.content ?? '');
+      setHistoryTick((t) => t + 1);
 
       closeCloudLoginModal();
 
@@ -599,6 +1160,9 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
       if (actionAfterSync === 'pack_share' || actionAfterSync === 'pack_drive') {
         setPackInitialTab(actionAfterSync === 'pack_drive' ? 'drive' : 'share');
         setPackModalOpen(true);
+      } else if (actionAfterSync === 'import_drive') {
+        setImportInitialTab('drive');
+        setImportModalOpen(true);
       }
 
       setFeedbackNotice({
@@ -795,6 +1359,7 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
   const triggerCourseSearch = useCallback(
     async (customQuery?: string) => {
       if (!activeNote) return;
+      setDrawerMode('courses');
       setDrawerOpen(true);
       setDrawerLoading(true);
       setDrawerError(null);
@@ -909,9 +1474,16 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
     }
   };
 
-  // Keyboard shortcuts: Ctrl/Cmd+S to save draft, Alt+R to summon reference drawer on demand
+  // Keyboard shortcuts: Ctrl/Cmd+S to save draft, Ctrl/Cmd+Z / Shift+Z / Ctrl+Y for Undo/Redo, Alt+R for references
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      const hasModalOpen =
+        mindMapModalOpen ||
+        importModalOpen ||
+        packModalOpen ||
+        signInModalOpen ||
+        logoutModalOpen;
+
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
         e.preventDefault();
         if (activeNote && !isReadMode) {
@@ -925,6 +1497,33 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
             });
           }
         }
+      } else if (
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !hasModalOpen &&
+        activeNote &&
+        !isReadMode &&
+        (e.key.toLowerCase() === 'z' || (e.key.toLowerCase() === 'y' && e.ctrlKey && !e.metaKey))
+      ) {
+        const activeEl = document.activeElement;
+        const isInsideEditor = Boolean(
+          activeEl && editorContainerRef.current?.contains(activeEl),
+        );
+        const isNonEditorInput = Boolean(
+          activeEl &&
+            (activeEl.tagName === 'INPUT' ||
+              activeEl.tagName === 'TEXTAREA' ||
+              (activeEl as HTMLElement).isContentEditable) &&
+            !isInsideEditor,
+        );
+        if (isNonEditorInput) return;
+
+        e.preventDefault();
+        if (e.key.toLowerCase() === 'y' || e.shiftKey) {
+          handleRedo();
+        } else {
+          handleUndo();
+        }
       } else if (e.altKey && e.key.toLowerCase() === 'r') {
         e.preventDefault();
         if (activeNote) {
@@ -934,7 +1533,22 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeNote, isReadMode, isAuthenticated, topics, notes, handleSaveDraft, triggerCourseSearch]);
+  }, [
+    activeNote,
+    isReadMode,
+    isAuthenticated,
+    topics,
+    notes,
+    mindMapModalOpen,
+    importModalOpen,
+    packModalOpen,
+    signInModalOpen,
+    logoutModalOpen,
+    handleSaveDraft,
+    handleUndo,
+    handleRedo,
+    triggerCourseSearch,
+  ]);
 
   const handleLogoutRequest = () => {
     if (isDirty) {
@@ -1098,6 +1712,19 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
           <span>新增研究筆記</span>
         </button>
 
+        <button
+          type="button"
+          onClick={() => {
+            setImportInitialTab(undefined);
+            setImportModalOpen(true);
+            setMobileNavOpen(false);
+          }}
+          className="w-full min-h-[40px] px-3 py-2 rounded-lg bg-white border border-zinc-200 hover:bg-zinc-50 text-zinc-800 text-xs font-medium inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+        >
+          <FileUp className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
+          <span>匯入本地 / 雲端筆記</span>
+        </button>
+
         <div className="relative">
           <Search
             className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
@@ -1239,6 +1866,33 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
       </div>
 
       <div className="p-3 border-t border-zinc-200 space-y-2 bg-[#f4f4f2]">
+        {isMobileViewport && activeNote && (
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setVoicePanelOpen(true);
+                setMobileNavOpen(false);
+              }}
+              className="min-h-[40px] px-2.5 py-2 rounded-lg bg-white border border-zinc-200 hover:bg-zinc-50 text-zinc-800 text-xs font-medium inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+            >
+              <Mic className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
+              <span>語音逐字稿</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMobileNavOpen(false);
+                openMindMapFromEditor();
+              }}
+              className="min-h-[40px] px-2.5 py-2 rounded-lg bg-white border border-zinc-200 hover:bg-zinc-50 text-zinc-800 text-xs font-medium inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
+            >
+              <Network className="w-3.5 h-3.5 text-blue-700 shrink-0" aria-hidden="true" />
+              <span>生成心智圖</span>
+            </button>
+          </div>
+        )}
+
         <button
           type="button"
           disabled={notes.length === 0}
@@ -1369,26 +2023,104 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
                 ))}
               </select>
 
-              <button
-                type="button"
-                onClick={() => setIsReadMode((v) => !v)}
-                className="min-h-[38px] px-3 py-1.5 rounded-lg bg-white border border-zinc-200 hover:bg-zinc-100 text-zinc-700 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              <div
+                role="group"
+                aria-label="檢視模式"
+                className="flex items-center gap-0.5 p-0.5 bg-zinc-200/70 rounded-lg"
               >
-                {isReadMode ? (
-                  <>
-                    <PenLine className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>繼續編輯</span>
-                  </>
-                ) : (
-                  <>
-                    <Eye className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>純淨閱讀</span>
-                  </>
-                )}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsReadMode(false);
+                    setIsSplitPreview(false);
+                  }}
+                  className={`min-h-[34px] px-2.5 py-1 rounded-md text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    !isReadMode && !isSplitPreview
+                      ? 'bg-white text-zinc-950 shadow-xs'
+                      : 'text-zinc-600 hover:text-zinc-900'
+                  }`}
+                >
+                  <PenLine className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>專心編輯</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsReadMode(false);
+                    setIsSplitPreview(true);
+                  }}
+                  className={`min-h-[34px] px-2.5 py-1 rounded-md text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    !isReadMode && isSplitPreview
+                      ? 'bg-white text-zinc-950 shadow-xs'
+                      : 'text-zinc-600 hover:text-zinc-900'
+                  }`}
+                >
+                  <Columns2 className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>即時雙欄</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsReadMode(true);
+                    setIsSplitPreview(false);
+                  }}
+                  className={`min-h-[34px] px-2.5 py-1 rounded-md text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    isReadMode
+                      ? 'bg-white text-zinc-950 shadow-xs'
+                      : 'text-zinc-600 hover:text-zinc-900'
+                  }`}
+                >
+                  <Eye className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>純淨閱讀</span>
+                </button>
+              </div>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setVoicePanelOpen((v) => !v)}
+                className={`min-h-[38px] px-3.5 py-1.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                  voicePanelOpen
+                    ? 'bg-blue-50 border-blue-700 text-blue-800'
+                    : 'bg-white border-zinc-200 hover:bg-zinc-100 text-zinc-800'
+                }`}
+              >
+                <Mic className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+                <span>語音逐字稿</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={openMindMapFromEditor}
+                className="min-h-[38px] px-3.5 py-1.5 rounded-lg bg-white border border-zinc-200 hover:bg-zinc-100 text-zinc-800 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                <Network className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+                <span>心智圖</span>
+              </button>
+
+              {importedRefDoc && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (drawerOpen && drawerMode === 'doc') {
+                      setDrawerOpen(false);
+                    } else {
+                      setDrawerMode('doc');
+                      setDrawerOpen(true);
+                    }
+                  }}
+                  className={`min-h-[38px] px-3.5 py-1.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors ${
+                    drawerOpen && drawerMode === 'doc'
+                      ? 'bg-blue-50 border-blue-700 text-blue-800'
+                      : 'bg-white border-zinc-200 hover:bg-zinc-100 text-zinc-800'
+                  }`}
+                >
+                  <BookOpen className="w-3.5 h-3.5 text-blue-700" aria-hidden="true" />
+                  <span>對照參考文件</span>
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => void triggerCourseSearch()}
@@ -1469,18 +2201,36 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
                   這裡沒有動態牆或演算法推播。點擊下方按鈕建立筆記，寫作卡關時可隨時喚醒開放課程與學術文獻參考。
                 </p>
                 {!isMobileViewport && (
-                  <button
-                    type="button"
-                    onClick={() => void handleCreateNote()}
-                    className="min-h-[42px] px-5 py-2.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-sm font-medium inline-flex items-center gap-2 cursor-pointer"
-                  >
-                    <Plus className="w-4 h-4" aria-hidden="true" />
-                    <span>建立第一篇筆記</span>
-                  </button>
+                  <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => void handleCreateNote()}
+                      className="min-h-[42px] px-5 py-2.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-sm font-medium inline-flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" aria-hidden="true" />
+                      <span>建立第一篇筆記</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setImportInitialTab(undefined);
+                        setImportModalOpen(true);
+                      }}
+                      className="min-h-[42px] px-5 py-2.5 rounded-lg bg-white border border-zinc-300 hover:bg-zinc-100 text-zinc-800 text-sm font-medium inline-flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                    >
+                      <FileUp className="w-4 h-4 text-blue-700" aria-hidden="true" />
+                      <span>匯入本地或雲端檔案</span>
+                    </button>
+                  </div>
                 )}
               </div>
             ) : (
-              <div className="max-w-[740px] mx-auto space-y-6">
+              <div
+                ref={editorContainerRef}
+                className={`mx-auto space-y-6 ${
+                  !isReadMode && isSplitPreview ? 'max-w-[1160px]' : 'max-w-[740px]'
+                }`}
+              >
                 {feedbackNotice && (
                   <div
                     role="status"
@@ -1535,20 +2285,71 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
                   </div>
                 </header>
 
-                {/* Writing Canvas vs Pure Reading View */}
+                <VoiceTranscriptPanel
+                  isOpen={voicePanelOpen}
+                  onClose={() => setVoicePanelOpen(false)}
+                  onInsertTranscript={handleInsertTranscript}
+                  onConvertToMindMap={openMindMapFromVoice}
+                />
+
+                {/* Formatting Bar & Writing / Split-Preview / Pure Reading Canvas */}
                 {isReadMode ? (
                   <div className="py-1">
                     <MarkdownReader content={draftContent} />
                   </div>
                 ) : (
-                  <div>
-                    <textarea
-                      value={draftContent}
-                      onChange={(e) => handleDraftContentChange(e.target.value)}
-                      placeholder="以 Markdown 專心書寫您的研究構想、實驗觀察或推導筆記...&#10;&#10;卡關時可點擊右上角「尋找參考課程」（或按 Alt+R）按需檢索公開課程與學術論文。"
-                      aria-label="研究筆記 Markdown 內容"
-                      className="w-full min-h-[440px] bg-transparent text-[15px] sm:text-[16px] text-zinc-800 leading-[1.75] placeholder:text-zinc-400 resize-y border-none focus:outline-none font-sans"
+                  <div className="space-y-4">
+                    <EditorFormattingBar
+                      canUndo={canUndo}
+                      canRedo={canRedo}
+                      onUndo={handleUndo}
+                      onRedo={handleRedo}
+                      onApplyLinePrefix={handleApplyLinePrefix}
+                      onWrapSelection={handleWrapSelection}
+                      onInsertBlock={handleInsertBlock}
+                      onOpenMindMap={openMindMapFromEditor}
+                      mindMapDisabled={!draftContent.trim() && !mindMapVoiceText.trim()}
                     />
+
+                    {isSplitPreview ? (
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+                        <div className="rounded-xl border border-zinc-200 bg-white p-4">
+                          <VisualMarkdownEditor
+                            content={draftContent}
+                            compact
+                            selectionRequest={selectionRequest}
+                            placeholder="以 Markdown 書寫，右側將即時顯示排版、五色螢光筆、表格、圖片與可收合段落效果..."
+                            onChangeContent={handleEditorTypingChange}
+                            onCommitContent={handleEditorCommitChange}
+                            onSelectionChange={(start, end) => {
+                              editorSelectionRef.current = { start, end };
+                            }}
+                            onPasteImage={(file, globalStart, globalEnd) =>
+                              void handlePasteImageFile(file, globalStart, globalEnd)
+                            }
+                          />
+                        </div>
+                        <div className="rounded-xl border border-zinc-200 bg-white p-5 min-h-[514px] overflow-x-auto">
+                          <MarkdownReader content={draftContent} />
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <VisualMarkdownEditor
+                          content={draftContent}
+                          selectionRequest={selectionRequest}
+                          placeholder="以 Markdown 專心書寫您的研究構想、實驗觀察或推導筆記（可直接貼上截圖，或使用上方排版工具列加入標題、五色螢光筆、表格、圖片與可收合段落）..."
+                          onChangeContent={handleEditorTypingChange}
+                          onCommitContent={handleEditorCommitChange}
+                          onSelectionChange={(start, end) => {
+                            editorSelectionRef.current = { start, end };
+                          }}
+                          onPasteImage={(file, globalStart, globalEnd) =>
+                            void handlePasteImageFile(file, globalStart, globalEnd)
+                          }
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1613,18 +2414,116 @@ export function WorkspaceView({ user, onUnauthorized }: WorkspaceViewProps) {
           {/* On-Demand Right Reference Drawer (never mounts/requests until triggered) */}
           <ReferenceDrawer
             isOpen={drawerOpen}
+            drawerMode={drawerMode}
+            importedRefDoc={importedRefDoc}
+            hasActiveNote={Boolean(activeNote)}
             isLoading={drawerLoading}
             keywords={drawerKeywords}
             items={drawerItems}
             degraded={drawerDegraded}
             errorMessage={drawerError}
             pinnedRefs={activeNote?.courseRefs ?? []}
+            onChangeMode={setDrawerMode}
             onClose={() => setDrawerOpen(false)}
             onRefreshSearch={(q) => void triggerCourseSearch(q)}
             onPinRef={handlePinRef}
+            onInsertRefDocToNote={(doc) =>
+              insertContentIntoActiveNote(
+                doc.content,
+                `已將參考文件「${doc.title}」插入目前筆記。`,
+              )
+            }
+            onCreateNoteFromRefDoc={(doc) =>
+              createNoteWithContent(
+                doc.title,
+                doc.content,
+                `已將參考文件「${doc.title}」轉存為新筆記。`,
+              )
+            }
+            onClearImportedRefDoc={() => {
+              setImportedRefDoc(null);
+              if (drawerItems.length > 0) {
+                setDrawerMode('courses');
+              } else {
+                setDrawerOpen(false);
+              }
+            }}
           />
         </div>
       </div>
+
+      <ImportNoteModal
+        isOpen={importModalOpen}
+        isAuthenticated={isAuthenticated}
+        hasActiveNote={Boolean(activeNote)}
+        initialTab={importInitialTab}
+        onClose={() => setImportModalOpen(false)}
+        onRequestCloudLogin={(reason) => {
+          setImportModalOpen(false);
+          openCloudLoginModal(reason, 'import_drive');
+        }}
+        onApplyImport={handleApplyImport}
+      />
+
+      <MindMapModal
+        isOpen={mindMapModalOpen}
+        hasActiveNote={Boolean(activeNote)}
+        initialSourceId={mindMapInitialSource}
+        sources={[
+          ...(mindMapSelectionText.length >= 10
+            ? [
+                {
+                  id: 'selection' as const,
+                  label: '目前選取段落',
+                  text: mindMapSelectionText,
+                  title: draftTitle,
+                },
+              ]
+            : []),
+          ...(draftContent.trim().length > 0
+            ? [
+                {
+                  id: 'note' as const,
+                  label: '整篇筆記內容',
+                  text: draftContent,
+                  title: draftTitle,
+                },
+              ]
+            : []),
+          ...(mindMapVoiceText.length > 0
+            ? [
+                {
+                  id: 'voice' as const,
+                  label: '語音逐字稿',
+                  text: mindMapVoiceText,
+                  title: draftTitle || '語音筆記心智圖',
+                },
+              ]
+            : []),
+        ]}
+        onClose={() => setMindMapModalOpen(false)}
+        onInsertOutline={(markdown) =>
+          insertContentIntoActiveNote(markdown, '已將心智圖整理大綱插入目前筆記。')
+        }
+        onInsertImage={(imageMarkdown, title) => {
+          if (draftContent.length + imageMarkdown.length + 4 > MAX_NOTE_CONTENT_CHARS) {
+            setFeedbackNotice({
+              tone: 'warn',
+              text: '加入此心智圖圖片後將超過單篇筆記 100,000 字元儲存上限，建議改用「下載 PNG」或拆分成兩篇筆記。',
+            });
+            return;
+          }
+          handleInsertBlock(imageMarkdown);
+          setIsReadMode(false);
+          setFeedbackNotice({
+            tone: 'neutral',
+            text: `已將心智圖「${title}」以圖片形式插入目前筆記。`,
+          });
+        }}
+        onCreateNoteFromOutline={(title, markdown) =>
+          createNoteWithContent(title, markdown, `已建立心智圖筆記「${title}」。`)
+        }
+      />
 
       <PackShareModal
         isOpen={packModalOpen}

@@ -86,3 +86,45 @@ export type DriveUploadedFileItem = {
   mimeType: string;
 };
 
+export type DriveReadableFileItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime?: string;
+  size?: string;
+  webViewLink?: string;
+};
+
+export type ImportedDocumentPreview = {
+  title: string;
+  content: string;
+  truncated: boolean;
+  charCount: number;
+  formatLabel: string;
+  sourceKind: 'local' | 'drive';
+  sourceName: string;
+  webViewLink?: string;
+};
+
+export type ImportedReferenceDoc = {
+  title: string;
+  content: string;
+  sourceLabel: string;
+  webViewLink?: string;
+};
+
+export type MindMapBranchColor = 'blue' | 'emerald' | 'amber' | 'rose' | 'violet';
+
+export type MindMapNode = {
+  id: string;
+  label: string;
+  detail?: string;
+  color: MindMapBranchColor;
+  children: MindMapNode[];
+};
+
+export type MindMapResult = {
+  root: MindMapNode;
+  nodeCount: number;
+};
+
